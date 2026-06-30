@@ -1,4 +1,6 @@
 // Copyright © 2023-2024 Apple Inc.
+#include <cstdlib>
+#include <iostream>
 #include <memory>
 
 #include "mlx/backend/gpu/eval.h"
@@ -22,6 +24,41 @@ inline void check_error(MTL::CommandBuffer* cbuf) {
         << cbuf->error()->localizedDescription()->utf8String();
     throw std::runtime_error(msg.str());
   }
+}
+
+// Opt-in (default OFF): when the environment variable
+// MLX_ASYNC_GPU_ERRORS_NONFATAL=1 is set, a command-buffer error detected inside
+// an ASYNC Metal completion handler is LOGGED instead of thrown.
+//
+// Rationale: a C++ throw from a completion handler runs on Metal's dispatch
+// worker thread, where there is no surrounding catch frame, so it propagates
+// straight to std::terminate -> abort. On iOS the system errors any in-flight
+// GPU command buffer the instant the app leaves the foreground
+// (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted), so any app
+// whose GPU work straddles a foreground->background transition crashes
+// UNCATCHABLY. With this opt-in enabled the async handlers fail soft; the
+// SYNCHRONOUS check_error() in synchronize() still throws on the CALLER's thread
+// (which IS catchable), so callers can still detect and recover from the
+// failure. Default preserves upstream throw-everywhere behavior.
+static bool async_gpu_errors_nonfatal() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("MLX_ASYNC_GPU_ERRORS_NONFATAL");
+    return v != nullptr && v[0] == '1';
+  }();
+  return enabled;
+}
+
+inline void check_error_async(MTL::CommandBuffer* cbuf) {
+  if (cbuf->status() != MTL::CommandBufferStatusError) {
+    return;
+  }
+  if (async_gpu_errors_nonfatal()) {
+    std::cerr << "[METAL] Command buffer execution failed (async, non-fatal): "
+              << cbuf->error()->localizedDescription()->utf8String()
+              << std::endl;
+    return;
+  }
+  check_error(cbuf);
 }
 
 void eval(array& arr) {
@@ -60,14 +97,14 @@ void eval(array& arr) {
     command_buffer->addCompletedHandler(
         [s, buffers = std::move(buffers)](MTL::CommandBuffer* cbuf) {
           scheduler::notify_task_completion(s);
-          check_error(cbuf);
+          check_error_async(cbuf);
         });
     d.commit_command_buffer(s.index);
     d.get_command_buffer(s.index);
   } else {
     command_buffer->addCompletedHandler(
         [buffers = std::move(buffers)](MTL::CommandBuffer* cbuf) {
-          check_error(cbuf);
+          check_error_async(cbuf);
         });
   }
 }
