@@ -114,7 +114,7 @@ void finalize(Stream s) {
   auto& d = metal::device(s.device);
   auto cb = d.get_command_buffer(s.index);
   d.end_encoding(s.index);
-  cb->addCompletedHandler([](MTL::CommandBuffer* cbuf) { check_error(cbuf); });
+  cb->addCompletedHandler([](MTL::CommandBuffer* cbuf) { check_error_async(cbuf); });
   d.commit_command_buffer(s.index);
   d.get_command_buffer(s.index);
 }
